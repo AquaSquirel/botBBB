@@ -1,3 +1,4 @@
+const NodeWebcam = require("node-webcam");
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const fs = require('node:fs');
@@ -6,12 +7,13 @@ const Gpio = require('pigpio').Gpio;
 // Configuração do pino de transmissão (pino 23)
 const pinOut = new Gpio(23, {
     mode: Gpio.OUTPUT,
+    pullUpDown: Gpio.PUD_OFF,  // Não usar resistores de pull-up ou pull-down
 });
 
-// Configuração do pino de recepção (pino 24)
+// Configuração do pino de recepção (pino 24) para o sensor de abertura da porta
 const pinIn = new Gpio(24, {
     mode: Gpio.INPUT,
-    pullUpDown: Gpio.PUD_OFF, // Não usar resistores de pull-up ou pull-down
+    pullUpDown: Gpio.PUD_OFF,  // Não usar resistores de pull-up ou pull-down
 });
 
 const webcamOptions = {
@@ -61,37 +63,34 @@ const client = new Client({
 client.on('ready', () => {
     console.log('Client is ready!');
 
-    let signalLost = false;
+    let isDoorOpen = false;
 
     setInterval(async () => {
-        const signal = pinIn.digitalRead(); // Lê o estado do pino de recepção
+        const signal = pinIn.digitalRead(); // Lê o estado do pino de entrada (sensor)
         console.log(`Estado do pino de recepção (GPIO 24): ${signal}`);
 
-        if (signal === 0 && !signalLost) {
-            signalLost = true;
-            console.log('🚨 Sinal perdido! Capturando e enviando foto...');
+        // Se o sinal for 0, significa que a porta está aberta (sensor interrompido a corrente)
+        if (signal === 0 && !isDoorOpen) {
+            isDoorOpen = true;
+            console.log('🚨 Porta aberta! Capturando foto a cada 10 segundos...');
             try {
-                const imgName = await takePicture();
-                const media = await MessageMedia.fromFilePath(`./${imgName}`);
-                await client.sendMessage('SEU_NUMERO_AQUI', media);
-                fs.unlinkSync(`./${imgName}`);
+                setInterval(async () => {
+                    const imgName = await takePicture();
+                    const media = await MessageMedia.fromFilePath(`./${imgName}`);
+                    await client.sendMessage('SEU_NUMERO_AQUI', media);
+                    fs.unlinkSync(`./${imgName}`);
+                }, 10000); // Captura uma foto a cada 10 segundos enquanto a porta está aberta
             } catch (err) {
                 console.error("Erro ao processar a imagem:", err);
             }
-        } else if (signal === 1) {
-            signalLost = false;
         }
-    }, 500);
 
-    // Simulando o envio do sinal (pino 23) a cada 2 segundos
-    setInterval(() => {
-        pinOut.digitalWrite(1); // Envia sinal alto
-        console.log('Sinal enviado: 1');
-        setTimeout(() => {
-            pinOut.digitalWrite(0); // Envia sinal baixo
-            console.log('Sinal enviado: 0');
-        }, 1000); // Mantém sinal alto por 1 segundo
-    }, 3000); // Envia um sinal a cada 3 segundos
+        // Se o sinal for 1, significa que a porta foi fechada (sensor com a corrente restabelecida)
+        if (signal === 1 && isDoorOpen) {
+            isDoorOpen = false;
+            console.log('🚪 Porta fechada! Parando a captura de fotos.');
+        }
+    }, 500); // Verifica o estado do sensor a cada 500ms
 });
 
 client.on('qr', qr => {
