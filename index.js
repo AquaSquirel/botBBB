@@ -1,63 +1,97 @@
-const NodeWebcam = require("node-webcam");
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const fs = require('node:fs');
+const Gpio = require('pigpio').Gpio;
 
-const client = new Client({
-    authStrategy: new LocalAuth()
+// Configuração do pino de transmissão (pino 23)
+const pinOut = new Gpio(23, {
+    mode: Gpio.OUTPUT,
 });
 
-// Configurações da webcam
+// Configuração do pino de recepção (pino 24)
+const pinIn = new Gpio(24, {
+    mode: Gpio.INPUT,
+    pullUpDown: Gpio.PUD_OFF, // Não usar resistores de pull-up ou pull-down
+});
+
 const webcamOptions = {
     width: 1280,
     height: 720,
     quality: 100,
     saveShots: true,
     output: "jpeg",
-    device: 1,
+    device: '/dev/video0',
     callbackReturn: "location",
     verbose: false
 };
 
-// Cria uma instância da webcam
 const webcam = NodeWebcam.create(webcamOptions);
 
-// Função para capturar a imagem com Promise
 const takePicture = () => {
     return new Promise((resolve, reject) => {
-        const imageName = `photo_${Date.now()}.jpeg`; // Nome da imagem com timestamp
-
-        // Captura a imagem e salva no arquivo
+        const imageName = `photo_${Date.now()}.jpeg`;
         webcam.capture(imageName, function (err, data) {
             if (err) {
                 console.error("Erro ao capturar a imagem:", err);
-                reject(err); // Rejeita a Promise em caso de erro
+                reject(err);
             } else {
                 console.log(`Imagem capturada e salva como: ${data}`);
-                resolve(imageName); // Resolve a Promise com o nome da imagem
+                resolve(imageName);
             }
         });
     });
 };
 
-client.on('ready', () => {
-    console.log('Client is ready!');
+const client = new Client({
+    puppeteer: {
+        headless: true,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-zygote',
+            '--single-process',
+            '--disable-gpu'
+        ]
+    },
+    authStrategy: new LocalAuth()
 });
 
-client.on('message', async msg => {
-    if (msg.body.toLowerCase() === `cam`) {
-        console.log('Tirando foto...');
-        msg.reply('Tirando foto...');
-        try {
-            const imgName = await takePicture(); // Espera a função retornar o nome da imagem
-            const media = await MessageMedia.fromFilePath(`./${imgName}`);
-            await msg.reply(media); // Envia a imagem como resposta
-            fs.unlinkSync(`./${imgName}`)
-        } catch (err) {
-            console.error("Erro ao processar a imagem:", err);
-            await msg.reply("Desculpe, houve um erro ao tirar a foto.");
+client.on('ready', () => {
+    console.log('Client is ready!');
+
+    let signalLost = false;
+
+    setInterval(async () => {
+        const signal = pinIn.digitalRead(); // Lê o estado do pino de recepção
+        console.log(`Estado do pino de recepção (GPIO 24): ${signal}`);
+
+        if (signal === 0 && !signalLost) {
+            signalLost = true;
+            console.log('🚨 Sinal perdido! Capturando e enviando foto...');
+            try {
+                const imgName = await takePicture();
+                const media = await MessageMedia.fromFilePath(`./${imgName}`);
+                await client.sendMessage('SEU_NUMERO_AQUI', media);
+                fs.unlinkSync(`./${imgName}`);
+            } catch (err) {
+                console.error("Erro ao processar a imagem:", err);
+            }
+        } else if (signal === 1) {
+            signalLost = false;
         }
-    }
+    }, 500);
+
+    // Simulando o envio do sinal (pino 23) a cada 2 segundos
+    setInterval(() => {
+        pinOut.digitalWrite(1); // Envia sinal alto
+        console.log('Sinal enviado: 1');
+        setTimeout(() => {
+            pinOut.digitalWrite(0); // Envia sinal baixo
+            console.log('Sinal enviado: 0');
+        }, 1000); // Mantém sinal alto por 1 segundo
+    }, 3000); // Envia um sinal a cada 3 segundos
 });
 
 client.on('qr', qr => {
@@ -65,3 +99,8 @@ client.on('qr', qr => {
 });
 
 client.initialize();
+
+process.on('SIGINT', () => {
+    console.log("\nEncerrando...");
+    process.exit();
+});
